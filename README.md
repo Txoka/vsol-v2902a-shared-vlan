@@ -1,10 +1,37 @@
 # V2902A shared VLAN policy
 
-Experimental native VLAN-policy extension for the V-SOL V2902A-XGS, vendor build
-**241017**, AArch64/musl. LAN1's customer VLAN policy is authoritative and is applied
-to both Ethernet ports. Physical/OMCI identities and GEM mappings remain separate.
-Normal changes are incremental; initialization and failure recovery reconcile the
-tables. This is not a background service or a startup rule-copy script.
+## Why this patch exists
+
+On a V-SOL V2902A-XGS running vendor build **241017**, DIGI PPPoE over VLAN 20
+worked through the 1G LAN1 port, while the faster LAN2/10GE port established a
+2.5G Ethernet link but received no PPPoE PADO replies. That prevented using the
+faster port for the Internet connection despite its working physical link.
+
+Inspection of the hardware VLAN tables found the difference: LAN1 had the
+VLAN-20 transparent service rule, while LAN2 lacked it. Both ports already had
+the required GEM mappings. Adding the missing LAN2 rule restored service, but a
+one-time change was lost on reboot. Linux bridge membership alone did not describe
+the vendor's separately programmed PON hardware forwarding policy.
+
+This patch makes **LAN1's customer VLAN policy authoritative for both ports**.
+It intercepts the vendor adaptor's VLAN API calls so additions, deletions, clears
+and supported VLAN settings update the paired policy, while initialization and
+failure recovery reconcile the hardware tables. Physical Ethernet identities,
+OMCI identities and GEM mappings remain separate. It replaces the boot-time
+VLAN-20 rule-copy workaround with native policy handling inside the OMCI process.
+
+This is an intentional shared-service policy for installations where both Ethernet
+ports should carry the same customer service. It is **not suitable for deployments
+that require independent services or isolation between LAN1 and LAN2**. The evidence
+identifies the missing hardware rule; it does not establish whether the original
+asymmetry came from an OLT provisioning choice, the vendor adaptor, or their
+interaction. This is not claimed to fix every V2902A or every ISP configuration.
+
+## Supported firmware and validation
+
+The extension targets vendor build **241017**, AArch64/musl, and retains the
+original vendor hardware routines. Normal policy changes are incremental; this is
+not a background service or a startup rule-copy script.
 
 The native overlay has passed a guarded real-device OMCI restart, reboot, WAN and
 rollback test on the supported build. Reproduce the gates for your exact binaries
@@ -218,14 +245,17 @@ original vendor routines. [docs/contract.md](docs/contract.md) records the inter
 
 ## Legal scope
 
-This private pre-release repository has no public redistribution licence yet.
-A public source licence can be selected separately; no rights to vendor software,
-SDKs or firmware are granted. This is not represented as a clean-room implementation.
-Interoperability knowledge was obtained by inspecting lawfully held software.
+The source code and documentation in this repository are licensed under the
+[MIT License](LICENSE). That licence covers this project's code, not vendor
+firmware, libraries, SDKs or locally generated files containing vendor code.
+Users must supply their own lawfully obtained vendor inputs; no such inputs or
+patched vendor binaries are distributed here. This is not represented as a
+clean-room implementation. Interoperability knowledge was obtained by inspecting
+lawfully held software.
 
 Spanish [Copyright Act, Article 100](https://www.boe.es/buscar/act.php?id=BOE-A-1996-8930#a100)
 and EU [Directive 2009/24/EC, Article 6](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32009L0024)
 provide conditional interoperability exceptions, not blanket redistribution
-permission. Private visibility does not remove copyright, licence or other legal
-obligations. Assess the facts and licences before public distribution; no legal
-clearance for every jurisdiction is claimed. No signature-bypass code is included.
+permission. Assess the applicable facts and licences before redistributing vendor
+material; no legal clearance for every jurisdiction is claimed. No signature-bypass
+code is included.
