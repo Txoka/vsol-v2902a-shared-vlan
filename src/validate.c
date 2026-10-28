@@ -19,6 +19,9 @@ int sp_validate_rule(const void *record)
     unsigned field, byte, value, tags;
     if (!bytes)
         return -1;
+#if defined(__clang__)
+#pragma clang loop unroll(full)
+#endif
     for (field = 0; field < sizeof(limits) / sizeof(limits[0]); ++field) {
         value = 0;
         for (byte = 0; byte < limits[field].width; ++byte)

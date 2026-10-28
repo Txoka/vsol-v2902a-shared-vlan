@@ -280,3 +280,22 @@ int sp_pon_clean_all_vlan_rule(void)
     unlock();
     return rc ? -1 : 0;
 }
+
+/* Equal-length import aliases keep the vendor adaptor string table in place.
+ * Aliases share the exact function address and argument ABI; no extra call. */
+extern __typeof__(sp_pon_add_vlan_rule) spn_add_vlan_rule
+    __attribute__((alias("sp_pon_add_vlan_rule")));
+extern __typeof__(sp_pon_del_vlan_rule) spn_del_vlan_rule
+    __attribute__((alias("sp_pon_del_vlan_rule")));
+extern __typeof__(sp_pon_clean_vlan_rule) spn_clean_vlan_rule
+    __attribute__((alias("sp_pon_clean_vlan_rule")));
+extern __typeof__(sp_pon_clean_all_vlan_rule) spn_clean_all_vlan_rule
+    __attribute__((alias("sp_pon_clean_all_vlan_rule")));
+extern __typeof__(sp_pon_set_vlan_tpid) spn_set_vlan_tpid
+    __attribute__((alias("sp_pon_set_vlan_tpid")));
+extern __typeof__(sp_pon_set_vlan_dscp_map) spn_set_vlan_dscp_map
+    __attribute__((alias("sp_pon_set_vlan_dscp_map")));
+extern __typeof__(sp_pon_set_vlan_downstream_mode) spn_set_vlan_downstream_mode
+    __attribute__((alias("sp_pon_set_vlan_downstream_mode")));
+extern __typeof__(sp_pon_enable_default_vlan_rule) spn_enable_default_vlan_rule
+    __attribute__((alias("sp_pon_enable_default_vlan_rule")));

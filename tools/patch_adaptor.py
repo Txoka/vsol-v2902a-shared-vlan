@@ -1,6 +1,8 @@
-"""Redirect eight imports in the exact supported owner-supplied adaptor.
+"""Exact-build, size-neutral dependency shim and import redirection.
 
-No machine instructions are replaced. No original or patched DSO is shipped.
+The adaptor's libxpon.so dependency becomes libsp.so. The shim itself depends on
+the original libxpon.so.1. Only eight undefined names change from pon_ to spn_.
+No instructions, exported names, segment sizes or BSS layout are changed.
 """
 import argparse
 import hashlib
@@ -22,58 +24,66 @@ def patch(original):
             "Unsupported adaptor SHA-256; no force mode is available")
     elf = Elf64(original)
     result = bytearray(original)
-    null = elf.null_offset
-    dh = elf.dynamic_header
-    require(null + 32 <= dh[2] + dh[5] and result[null:null + 32] == bytes(32),
-            "Insufficient dynamic segment padding")
-    start = elf.file_offset(elf.tag_value(5))
-    strings = bytearray(original[start:start + elf.tag_value(10)])
+    start, size = elf.file_offset(elf.tag_value(5)), elf.tag_value(10)
+    strings = bytearray(original[start:start + size])
+
+    def name_at(offset):
+        require(0 <= offset < len(strings), "Invalid string offset")
+        return strings[offset:strings.index(0, offset)].decode()
+
     symbols = elf.file_offset(elf.tag_value(6))
     hash_offset = elf.file_offset(elf.tag_value(4))
     buckets_count, count = elf.unpack("<II", hash_offset)
     gnu_first = elf.unpack("<I", elf.file_offset(elf.tag_value(0x6FFFFEF5)) + 4)[0]
     versions = elf.file_offset(elf.tag_value(0x6FFFFFF0))
-    changes = []
-    for index in range(count):
-        offset = symbols + index * 24
-        name_offset = elf.unpack("<I", offset)[0]
-        name = strings[name_offset:strings.index(0, name_offset)].decode()
+    names = [(index, elf.unpack("<I", symbols + index * 24)[0]) for index in range(count)]
+    before = {index: name_at(offset) for index, offset in names}
+    allowed, changes = set(), []
+    for index, offset in names:
+        name = before[index]
         if name not in IMPORTS:
             continue
-        require(elf.unpack("<H", offset + 6)[0] == 0, "Cannot rename a defined export")
+        require(elf.unpack("<H", symbols + index * 24 + 6)[0] == 0, "Cannot rename a defined export")
         require(index < gnu_first, "Cannot modify a GNU-hashed symbol")
         require(elf.unpack("<H", versions + index * 2)[0] in (0, 1), "Versioned import unsupported")
-        replacement = "sp_" + name
-        struct.pack_into("<I", result, offset, len(strings))
-        strings.extend(replacement.encode() + b"\0")
+        replacement = "spn_" + name[4:]
+        require(len(replacement) == len(name), "Import length changed")
+        strings[offset:offset + 3] = b"spn"
+        allowed.update(range(start + offset, start + offset + 3))
         changes.append({"index": index, "from": name, "to": replacement})
     require({item["from"] for item in changes} == IMPORTS, "Expected import set not found")
-    needed = len(strings)
-    strings.extend(b"libshared-vlan.so\0")
-    writable = [(offset, header) for offset, header in elf.loads if header[1] & 2]
-    require(len(writable) == 1, "Expected one writable segment")
-    rw_offset, rw = writable[0]
-    require(rw[2] + rw[5] == len(original), "Unexpected writable segment layout")
-    append = (rw[2] + rw[6] + 7) & ~7
-    result.extend(bytes(append - len(result)))
-    result.extend(strings)
-    new_address = rw[3] + append - rw[2]
-    struct.pack_into("<Q", result, elf.tags[5][0] + 8, new_address)
-    struct.pack_into("<Q", result, elf.tags[10][0] + 8, len(strings))
-    struct.pack_into("<QQ", result, null, 1, needed)
-    new_size = len(result) - rw[2]
-    struct.pack_into("<QQ", result, rw_offset + 32, new_size, new_size)
+    replacements = {item["index"]: item["to"] for item in changes}
+    for index, offset in names:
+        require(name_at(offset) == replacements.get(index, before[index]), "Shared symbol string would change")
+    needed = []
+    for position in range(elf.dynamic_header[2], elf.null_offset, 16):
+        tag, value = elf.unpack("<QQ", position)
+        if tag == 1:
+            needed.append((value, name_at(value)))
+    matching = [offset for offset, name in needed if name == "libxpon.so"]
+    require(len(matching) == 1, "Expected one libxpon.so dependency")
+    offset = matching[0]
+    replacement = b"libsp.so\0".ljust(len(b"libxpon.so\0"), b"\0")
+    strings[offset:offset + len(replacement)] = replacement
+    allowed.update(range(start + offset, start + offset + len(replacement)))
+    for index, symbol_offset in names:
+        require(name_at(symbol_offset) == replacements.get(index, before[index]), "Dependency overlaps a symbol name")
+    for dependency_offset, dependency in needed:
+        require(name_at(dependency_offset) == ("libsp.so" if dependency == "libxpon.so" else dependency),
+                "Another dependency was changed")
+    result[start:start + size] = strings
     buckets, chains = [0] * buckets_count, [0] * count
-    for index in range(1, count):
-        name_offset = struct.unpack_from("<I", result, symbols + index * 24)[0]
-        name = strings[name_offset:strings.index(0, name_offset)]
-        bucket = elf_hash(name) % buckets_count
+    for index, offset in names[1:]:
+        bucket = elf_hash(name_at(offset).encode()) % buckets_count
         chains[index] = buckets[bucket]
         buckets[bucket] = index
-    struct.pack_into("<" + "I" * (buckets_count + count), result, hash_offset + 8,
-                     *(buckets + chains))
+    length = 4 * (buckets_count + count)
+    struct.pack_into("<" + "I" * (buckets_count + count), result, hash_offset + 8, *(buckets + chains))
+    allowed.update(range(hash_offset + 8, hash_offset + 8 + length))
+    require(len(result) == len(original), "Adaptor file size changed")
+    require(all(a == b or index in allowed for index, (a, b) in enumerate(zip(original, result))),
+            "Unexpected bytes changed outside import strings and SysV hash metadata")
     require(result[0x42AD8:0xEBE40] == original[0x42AD8:0xEBE40], "Machine code changed")
-    require(result[rw[2] + rw[5]:rw[2] + rw[6]] == bytes(rw[6] - rw[5]), "BSS changed")
     return bytes(result), changes
 
 
@@ -85,11 +95,14 @@ def main():
     require(args.source.resolve() != args.output.resolve(), "Refusing to overwrite the source DSO")
     result, changes = patch(args.source.read_bytes())
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    require(not args.output.exists(), "Output exists; remove it explicitly before rebuilding")
-    args.output.write_bytes(result)
-    manifest = {"source_sha256": SUPPORTED_SHA256,
-                "patched_sha256": hashlib.sha256(result).hexdigest(),
-                "redirected_imports": changes, "status": "EXPERIMENTAL_NOT_BOOT_VALIDATED"}
+    if args.output.exists():
+        require(args.output.read_bytes() == result, "Output exists with different bytes; refusing to overwrite")
+    else:
+        args.output.write_bytes(result)
+    manifest = {"source_sha256": SUPPORTED_SHA256, "patched_sha256": hashlib.sha256(result).hexdigest(),
+                "redirected_imports": changes, "dependency_shim": "libsp.so",
+                "adaptor_size_unchanged": True, "load_segments_unchanged": True,
+                "status": "EXPERIMENTAL_NOT_BOOT_VALIDATED"}
     args.output.with_suffix(args.output.suffix + ".json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 

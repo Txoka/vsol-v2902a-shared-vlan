@@ -9,7 +9,7 @@ struct device {
     unsigned char dscp[24];
 };
 static struct device ports[64];
-static unsigned calls, fail_add_once, fail_add_always;
+static unsigned calls, fail_add_once, fail_add_always, fail_global_once;
 extern unsigned sp_failed_recoveries;
 int sp_pon_add_vlan_rule(unsigned, const void *);
 int sp_pon_del_vlan_rule(unsigned, unsigned);
@@ -18,6 +18,7 @@ int sp_pon_set_vlan_tpid(unsigned, unsigned, unsigned);
 int sp_pon_set_vlan_dscp_map(unsigned, const void *);
 int sp_pon_set_vlan_downstream_mode(unsigned, unsigned);
 int sp_pon_enable_default_vlan_rule(unsigned);
+int sp_pon_clean_all_vlan_rule(void);
 int sp_read_rules(unsigned p, unsigned char out[32][64])
 {
     memcpy(out, ports[p].r, ports[p].n * 64);
@@ -53,6 +54,10 @@ int pon_clean_all_vlan_rule(void)
     unsigned p;
     for (p = 0; p < 64; p++)
         ports[p].n = 0;
+    if (fail_global_once) {
+        fail_global_once = 0;
+        return -1;
+    }
     return 0;
 }
 int pon_clean_vlan_rule(unsigned p)
@@ -184,7 +189,9 @@ int main(void)
     assert(sp_pon_add_vlan_rule(11, row) == -1);
     same();
     assert(ports[11].n == 32);
-    assert(!sp_pon_clean_vlan_rule(11));
+    assert(!sp_pon_add_vlan_rule(7, row));
+    assert(!sp_pon_clean_all_vlan_rule());
+    assert(ports[7].n == 0 && ports[11].n == 0);
     same();
     assert(!pthread_create(&t[0], 0, worker, (void *)1));
     assert(!pthread_create(&t[1], 0, worker, (void *)2));
@@ -195,6 +202,12 @@ int main(void)
     assert(!sp_pon_add_vlan_rule(7, row));
     assert(ports[7].n == 1);
     same();
+    fail_global_once = 1;
+    assert(sp_pon_clean_all_vlan_rule() == -1);
+    assert(ports[7].n == 0); /* Global rollback does not restore unrelated ports. */
+    assert(!sp_pon_clean_vlan_rule(12)); /* Recovery restores the canonical pair. */
+    same();
+    assert(ports[11].n == 16);
     fail_add_always = 12;
     assert(sp_pon_add_vlan_rule(11, row) == -1);
     assert(sp_failed_recoveries == 1);

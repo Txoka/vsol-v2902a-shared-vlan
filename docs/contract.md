@@ -3,7 +3,7 @@
 The target is Linux AArch64 ELF64, little endian, using the vendor musl ABI.
 The wrappers return signed 32-bit `int`: zero for success and minus one for failure.
 
-| Original import (wrapper adds `sp_`) | Arguments |
+| Original import (`pon_` becomes `spn_`) | Arguments |
 |---|---|
 | `pon_add_vlan_rule` | unsigned port, pointer to readable 64-byte record |
 | `pon_del_vlan_rule` | unsigned port, unsigned zero-based index |

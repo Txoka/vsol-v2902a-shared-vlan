@@ -6,7 +6,9 @@ to both Ethernet ports. Physical/OMCI identities and GEM mappings remain separat
 Normal changes are incremental; initialization and failure recovery reconcile the
 tables. This is not a background service or a startup rule-copy script.
 
-**Not boot validated. Do not treat a successful build as approval to install.**
+The native overlay has passed a guarded real-device OMCI restart, reboot, WAN and
+rollback test on the supported build. Reproduce the gates for your exact binaries
+before installing. A repacked full firmware image is a separate, unbooted candidate.
 The currently supported adaptor has SHA-256:
 
 ```text
@@ -71,8 +73,7 @@ make patch VENDOR_LIB_DIR=vendor \
 
 The password is prompted, never included in a command or saved. Unknown or changed
 host keys are rejected. Override `KNOWN_HOSTS=/path/to/verified/known_hosts` if you
-keep the host key elsewhere. Paramiko is optional and is needed only for this copy
-step. The ignored `.venv/` and `vendor/` directories are never publication inputs.
+keep the host key elsewhere. Paramiko is needed for the SSH copy, hardware tests and installation. The ignored `.venv/` and `vendor/` directories are never publication inputs.
 
 ### Use copies you already have
 
@@ -93,22 +94,24 @@ make patch VENDOR_LIB_DIR=/path/to/local/vendor-libraries \
 
 Outputs:
 
-- `build/libshared-vlan.so`: newly compiled extension, not a replacement libxpon.
+- `build/libsp.so`: newly compiled extension, not a replacement libxpon.
 - `build/libapi_omci_adpt.so.1.0.0`: locally patched owner-supplied adaptor.
 - The adjacent JSON manifest: source and patched hashes, redirected imports.
 
-The patcher never overwrites the input or an existing output. To rebuild the patch,
+The patcher never overwrites the input or a differing existing output. To rebuild the patch,
 remove the generated patched adaptor explicitly, or use `make clean` and rebuild.
-`make clean` removes only `build/`. Build, patch and test targets do not connect to a device or write flash.
-Only the separately invoked `fetch-vendor` target reads files over SSH.
+`make clean` removes only `build/`. The plain `test`, `patch` and `check` targets are local. Explicit device targets
+connect over SSH; the integration and installation targets change overlay files
+and restart/reboot the ONT. They never write a firmware bank.
 
 ## How the local patch works
 
-Eight undefined VLAN API imports in the supported adaptor are redirected to
-matching wrappers in `libshared-vlan.so`, which is added as a dependency. Existing
-adaptor machine instructions and defined exports remain unchanged; ELF symbol/hash
-metadata and the writable segment's file representation change. Existing BSS is
-preserved as zero-initialized memory.
+Eight undefined VLAN API imports change from the `pon_` prefix to equal-length
+`spn_` aliases. The existing `libxpon.so` dependency becomes `libsp.so`; our
+extension depends on the original `libxpon.so.1`. Only import strings and the SysV
+symbol hash table change. The adaptor keeps its exact length, program headers,
+machine instructions, defined exports and BSS layout. No appended string table or
+expanded segment is needed. The aliases share function addresses with the test API.
 
 The wrappers retain AArch64 argument ABI and signed `int` results (`0` success,
 `-1` failure). TPID has separate input/output arguments, the DSCP map is 24 bytes,
@@ -120,45 +123,97 @@ not a claim of complete behavioral equivalence.
 Decimal logical ports **11 and 12** correspond to physical LAN1 and LAN2 on this
 build. These are not hexadecimal `0x11`/`0x12`, and are not OMCI UNI entity IDs.
 
-## Integration and recovery gates
+## Real-device validation and installation
 
-The two deployment files would occupy `/lib/libapi_omci_adpt.so.1.0.0` and
-`/lib/libshared-vlan.so` in a device-specific image. Preserve the original adaptor
-symlinks. **Do not copy build-only linker views or replace `libxpon.so.1`.**
+The following commands prompt for the ONT password and require a verified SSH host
+key. Router health uses your existing root SSH key; no credentials are stored.
+Substitute your addresses. Allow brief WAN interruptions during OMCI restarts and
+reboot. Keep the working cable connected throughout.
 
-This repository does not build a signed/flashable firmware image or modify a
-bootloader. Use your board's supported image packaging and validation process;
-do not concatenate these files into flash or bypass image/signature checks.
+```sh
+make validate-device PYTHON=.venv/bin/python \
+  ONT_HOST=192.168.101.1 ROUTER_HOST=192.168.1.1
+make install-device PYTHON=.venv/bin/python \
+  ONT_HOST=192.168.101.1 ROUTER_HOST=192.168.1.1
+```
 
-Before any deployment:
+`validate-device` runs host tests and exact binary checks, the real-driver
+benchmark, OMCI restart, real reboot, WAN health and stock rollback, then prepares
+`build/V2902A-241017-native-update.tar.gz`. It deliberately leaves stock installed.
+Tests use unused decimal slots 17/18 for benchmarking, require empty initial slots,
+and verify both physical port tables are unchanged afterward. The performance gate
+is a maximum median configuration latency ratio of 1.05; it is not relaxed on failure.
 
-1. Verify device/build hashes and preserve recoverable original images, settings
-   and board calibration outside Git. Confirm an independent recovery route.
-2. Validate dependency resolution with the target loader without executing OMCI.
-3. Audit all writers to the two VLAN tables. The incremental engine owns its
-   canonical policy; direct external writes can invalidate that state. Remove
-   conflicting startup workarounds only with a tested rollback plan.
-4. Test real OMCI create/update/delete, global reset, process restart, fibre
-   reconnection and reboot. A shell-only one-shot check is insufficient.
-5. Confirm VLAN/GEM isolation and retain original files for rollback. Hardware
-   writes are sequential, not atomic; rollback can itself fail. Failed rollback
-   is reported as `-1`, with a diagnostic and counter, then retried before updates.
+`install-device` refuses missing, failed or different-build evidence. It backs up
+the stock adaptor, old startup settings and workaround under the private device
+recovery directory `/root/vsol-shared-vlan-test`. A temporary early-boot procd
+rollback guard is armed before activation; loss of host keepalives for five minutes
+restores stock without depending on the patched library. After a successful OMCI
+restart and real reboot with WAN healthy and both VLAN policies equal, installation
+commits the overlay files and removes the temporary guard and old rule-copy helper.
+The backups remain. This is not a permanent background service.
 
-No automatic installation or flash target is supplied because these integration
-and recovery gates are incomplete.
+The installed files are `/lib/libapi_omci_adpt.so.1.0.0` and `/lib/libsp.so`.
+Existing adaptor symlinks remain. Never install linker-view copies or replace
+`libxpon.so.1`. OMCI loads the extension normally at runtime and boot. The overlay
+survives ordinary reboot, but factory reset removes it and firmware upgrades can
+replace it. It is operationally native, but it is not part of the immutable ROM.
 
-## Performance context
+To restore the verified original setup, including its previous VLAN-20 workaround:
 
-A preceding prototype was benchmarked on the ONT's Cortex-A53 CPU using real driver
-operations in unused logical slots, never physical LAN1/LAN2: a two-port add/delete
-cycle measured **30.81 us stock versus 31.41 us shared policy** (+1.95% median;
-21 alternating batches of 500 cycles). Both paths used four driver writes. This
-is configuration latency, not packet throughput, and not proof of identical speed.
-The source-only validator/build packaging in this checkout needs its own release
-benchmark; the earlier numbers must not be silently attributed to a changed build.
+```sh
+make device-rollback PYTHON=.venv/bin/python \
+  ONT_HOST=192.168.101.1 ROUTER_HOST=192.168.1.1
+```
+
+Individual gates are available as `make test`, `make check-binary`,
+`make benchmark-device`, `make test-integration`, and `make test-device`.
+Device reports and exact binary hashes remain in ignored `build/`. Host tests
+cover create/update/delete/reset, validation, concurrency and failure recovery;
+real-device tests cover actual OMCI initialization, process restart and reboot.
+These do not constitute exhaustive testing of every possible OLT transaction,
+fibre re-registration or every ISP configuration. External direct writers must
+not modify the paired VLAN tables behind the engine.
+
+## Optional full firmware candidate
+
+This is not required for the persistent overlay installation. To prepare a local
+candidate from your device's own stock bank, after the native validation gates:
+
+```sh
+make fetch-image PYTHON=.venv/bin/python ONT_HOST=192.168.101.1
+make squashfs-tools
+make image
+```
+
+The filesystem tools are built from a pinned official SquashFS-tools revision.
+The image builder preserves every existing filesystem entry and its metadata
+except the patched adaptor and adds only `lib/libsp.so`. It preserves kernel,
+DTB, FIP and container layout, verifies the original CRC/kernel hash, regenerates
+the container CRC, and rejects authenticated filesystem layouts. It uses 512 KiB
+XZ blocks instead of 256 KiB to fit the original rootfs budget.
+
+**The full image is structurally verified but has not been flashed or boot-tested.**
+No automatic flashing target is provided. A successful native overlay reboot does
+not prove that a repacked filesystem boots. Preserved overlay files can also mask
+new ROM files after a flash; do not assume an upgrade retaining settings provides
+a clean installation. No image or vendor library belongs in Git.
+
+## Size and performance
+
+For the current size-neutral design: original and patched adaptors are both
+1,408,720 bytes; the extension is 12,848 bytes. Combined disk growth is **0.91%**.
+Additional summed ELF load-segment memory is 14,389 bytes, before page rounding
+and stack usage. `make check-binary` verifies these properties for the actual build.
+
+The latest real-device benchmark measured **30.74432 us stock versus 31.40208 us
+shared policy**, **+2.14% median**, over 21 alternating batches of 500 two-port
+add/delete cycles on one CPU. Both paths perform four driver writes. Stock/shared
+p95 was 31.56704/32.89048 us. This is configuration latency, not packet throughput.
+Reports are tied to exact binary hashes; reproduce the benchmark for changed code.
 
 The previously discussed **30% slower add** was a separate experimental C
-reconstruction that is not included or used here. This extension retains the
+reconstruction that is not included or used here. The extension retains the
 original vendor routines. [docs/contract.md](docs/contract.md) records the interface.
 
 ## Legal scope
